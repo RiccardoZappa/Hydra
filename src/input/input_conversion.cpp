@@ -127,6 +127,11 @@ bool convertLabels(InputData& data) {
     return colorToLabels(data.label_image, data.label_image);
   }
 
+  LOG(INFO) << "[convertLabels] Received labels. "
+          << "Size: " << data.label_image.size()
+          << ", Type: " << data.label_image.type()
+          << ", Channels: " << data.label_image.channels();
+
   // Enforcing requirement for int32_t at this point
   if (data.label_image.type() != CV_32SC1) {
     cv::Mat new_label_image(data.label_image.size(), CV_32SC1);
@@ -136,12 +141,22 @@ bool convertLabels(InputData& data) {
 
   LabelRemapper label_remapper = GlobalInfo::instance().getLabelRemapper();
   if (!label_remapper.empty()) {
+
+    const int log_r = data.label_image.rows / 2;
+    const int log_c = data.label_image.cols / 2;
+
     for (int r = 0; r < data.label_image.rows; ++r) {
       for (int c = 0; c < data.label_image.cols; ++c) {
         // TODO(marcus): any reason to cache image and reassign with a new one?
         const auto& pixel = data.label_image.at<int32_t>(r, c);
         data.label_image.at<int32_t>(r, c) =
             label_remapper.remapLabel(pixel).value_or(-1);
+
+        if (r == log_r && c == log_c) {
+          LOG(INFO) << "[convertLabels] Remapping central pixel. "
+                    << "Original ID: " << pixel
+                    << " -> Remapped ID: " << data.label_image.at<int32_t>(r, c);
+        }
       }
     }
   }
