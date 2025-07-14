@@ -57,11 +57,11 @@ std::unique_ptr<InputData> parseInputPacket(const InputPacket& input_packet,
         }
     }
   }
-  const int log_r = data.label_image.rows / 2;
-  const int log_c = data.label_image.cols / 2;
+  const int log_r = data->label_image.rows / 2;
+  const int log_c = data->label_image.cols / 2;
 
   LOG(INFO) << "[convertLabels] Remapping central pixel. "
-          << " -> Panoptic ID: " << data.label_image.at<int32_t>(log_r, log_c);
+          << " -> Panoptic ID: " << data->label_image.at<int32_t>(log_r, log_c);
 
   if (!normalizeData(*data)) {
     LOG(ERROR) << "[Input Conversion] Unable to normalize data.";
@@ -175,11 +175,11 @@ bool convertLabels(InputData& data) {
     }
   }
 
-  const int log_r = data.label_image.rows / 2;
-  const int log_c = data.label_image.cols / 2;
+  const int log_r = data.panoptic_image.rows / 2;
+  const int log_c = data.panoptic_image.cols / 2;
 
-  LOG(INFO) << "[convertLabels] Remapping central pixel. "
-          << " -> Panoptic ID: " << data.label_image.at<int32_t>(log_r, log_c);
+  LOG(INFO) << "[convertLabels] Panoptic image central pixel. "
+          << " -> Panoptic ID: " << data.panoptic_image.at<int32_t>(log_r, log_c);
 
 
   const auto label_type = data.label_image.type();
