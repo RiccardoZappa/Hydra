@@ -80,7 +80,7 @@ struct TsdfVoxel {
   float distance = 0.0f;
   float weight = 0.0f;
   Color color;
-  int panoptic_id;
+  int panoptic_id = 0;
 };
 
 // Based on the semantic voxel from Kimera-Semantics

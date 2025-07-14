@@ -39,6 +39,30 @@ std::unique_ptr<InputData> parseInputPacket(const InputPacket& input_packet,
     return nullptr;
   }
 
+  if (!data->label_image.empty() && data->label_image.type() == CV_32SC1) {
+    LOG(INFO) << "Passed in the panoptic-semantic conversion loop";
+    // Copy the full panoptic map to its new field.
+    data->panoptic_image = data->label_image.clone();
+
+    //this semantic conversion ensure retro compatibility with label_image 
+    for (int r = 0; r < data->label_image.rows; ++r) {
+        for (int c = 0; c < data->label_image.cols; ++c) {
+            int32_t pan_id = data->panoptic_image.at<int32_t>(r, c);
+            if (pan_id > 0) {
+                // Decode semantic_id = (pan_id / 1000) - 1
+                data->label_image.at<int32_t>(r, c) = (pan_id / 1000) - 1;
+            } else {
+                data->label_image.at<int32_t>(r, c) = 0; // Background label
+            }
+        }
+    }
+  }
+  const int log_r = data.label_image.rows / 2;
+  const int log_c = data.label_image.cols / 2;
+
+  LOG(INFO) << "[convertLabels] Remapping central pixel. "
+          << " -> Panoptic ID: " << data.label_image.at<int32_t>(log_r, log_c);
+
   if (!normalizeData(*data)) {
     LOG(ERROR) << "[Input Conversion] Unable to normalize data.";
     return nullptr;
@@ -141,25 +165,22 @@ bool convertLabels(InputData& data) {
 
   LabelRemapper label_remapper = GlobalInfo::instance().getLabelRemapper();
   if (!label_remapper.empty()) {
-
-    const int log_r = data.label_image.rows / 2;
-    const int log_c = data.label_image.cols / 2;
-
     for (int r = 0; r < data.label_image.rows; ++r) {
       for (int c = 0; c < data.label_image.cols; ++c) {
         // TODO(marcus): any reason to cache image and reassign with a new one?
         const auto& pixel = data.label_image.at<int32_t>(r, c);
         data.label_image.at<int32_t>(r, c) =
             label_remapper.remapLabel(pixel).value_or(-1);
-
-        if (r == log_r && c == log_c) {
-          LOG(INFO) << "[convertLabels] Remapping central pixel. "
-                    << "Original ID: " << pixel
-                    << " -> Remapped ID: " << data.label_image.at<int32_t>(r, c);
-        }
       }
     }
   }
+
+  const int log_r = data.label_image.rows / 2;
+  const int log_c = data.label_image.cols / 2;
+
+  LOG(INFO) << "[convertLabels] Remapping central pixel. "
+          << " -> Panoptic ID: " << data.label_image.at<int32_t>(log_r, log_c);
+
 
   const auto label_type = data.label_image.type();
   if (label_type == CV_32SC1) {

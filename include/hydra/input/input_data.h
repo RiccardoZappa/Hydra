@@ -59,6 +59,8 @@ struct InputData {
   // Label image for semantic input data.
   cv::Mat label_image;
 
+  cv::Mat panoptic_image;
+
   // Instance masks for each instance in the label image
   uint64 map_view_id;
   std::vector<MaskData> instance_masks;
