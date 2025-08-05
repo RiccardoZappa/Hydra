@@ -121,6 +121,8 @@ class MeshSegmenter {
 
   void mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label);
 
+  spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud);
+
  private:
   NodeSymbol next_node_id_;
   std::map<uint32_t, std::set<NodeId>> active_nodes_;

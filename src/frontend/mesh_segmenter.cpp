@@ -62,6 +62,9 @@
 #define PCL_NO_PRECOMPILE
 #include <pcl/segmentation/extract_clusters.h>
 #undef PCL_NO_PRECOMPILE
+#include <pcl/features/normal_3d.h>
+#include <pcl/surface/gp3.h>
+#include <pcl/conversions.h>
 #include <config_utilities/config.h>
 #include <config_utilities/types/conversions.h>
 #include <config_utilities/types/enum.h>
@@ -741,6 +744,8 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
   //swap the node attribut point cloud with the filtered one
   attrs.point_cloud.swap(temp_cloud);
 
+  attrs.mesh = generateMeshFromCloud(attrs.point_cloud);
+
   updateObjectGeometry(*graph.mesh(), attrs);
 }
 
@@ -780,6 +785,9 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
   attrs->point_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGBA>());
   *(attrs->point_cloud) = cluster.mesh;
 
+  // add the created mesh from the point cloud to the object node
+  attrs->mesh = generateMeshFromCloud(attrs->point_cloud);
+
   std::shared_ptr<SemanticColorMap> label_map =
       GlobalInfo::instance().getSemanticColorMap();
   if (!label_map || !label_map->isValid()) {
@@ -794,6 +802,82 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
   graph.emplaceNode(config.layer_id, next_node_id_, std::move(attrs));
   active_nodes_.at(label).insert(next_node_id_);
   ++next_node_id_;
+}
+
+spark_dsg::Mesh::Ptr MeshSegmenter::generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud) {
+  // won't mesh a very small or invalid point cloud.
+if (!cloud || cloud->size() < 20) {
+    LOG(INFO) << "Meshing failed: Input cloud is too small or null. Size: "
+              << (cloud ? cloud->size() : 0);
+    return nullptr;
+  }
+
+  // 2. --- Estimate Surface Normals ---
+  pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
+  pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
+  tree->setInputCloud(cloud);
+
+  pcl::NormalEstimation<pcl::PointXYZRGBA, pcl::Normal> n;
+  n.setInputCloud(cloud);
+  n.setSearchMethod(tree);
+  n.setKSearch(30);
+  n.compute(*normals);
+
+  // 3. --- Combine Points and Normals ---
+  // **FIX:** Instead of concatenateFields, we now manually combine the XYZ and Normal data.
+  pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
+  pcl::copyPointCloud(*cloud, *cloud_with_normals); // Copies the XYZ data
+  pcl::copyPointCloud(*normals, *cloud_with_normals); // Copies the Normal data
+
+  // 4. --- Perform Meshing ---
+  pcl::search::KdTree<pcl::PointNormal>::Ptr tree2(new pcl::search::KdTree<pcl::PointNormal>);
+  tree2->setInputCloud(cloud_with_normals);
+
+  pcl::GreedyProjectionTriangulation<pcl::PointNormal> gp3;
+  pcl::PolygonMesh triangles;
+
+  gp3.setSearchRadius(0.15); // Increased radius, TUNE THIS
+  gp3.setMu(2.5);
+  gp3.setMaximumNearestNeighbors(100);
+  gp3.setMinimumAngle(M_PI / 18);
+  gp3.setMaximumAngle(2 * M_PI / 3);
+  gp3.setNormalConsistency(false);
+
+  gp3.setInputCloud(cloud_with_normals);
+  gp3.setSearchMethod(tree2);
+  gp3.reconstruct(triangles);
+  
+  LOG(INFO) << "Meshing attempt completed. Generated " << triangles.polygons.size() << " polygons.";
+  
+  if (triangles.polygons.empty()) {
+    return nullptr;
+  }
+
+  // 5. --- Convert pcl::PolygonMesh to spark_dsg::Mesh ---
+  auto final_mesh = std::make_shared<spark_dsg::Mesh>();
+  
+  // **FIX:** Convert the generic PCL mesh data to a temporary, structured point cloud first.
+  pcl::PointCloud<pcl::PointXYZ> vertices;
+  pcl::fromPCLPointCloud2(triangles.cloud, vertices);
+  
+  // Now, manually copy the vertices into the spark_dsg mesh structure.
+  final_mesh->points.reserve(vertices.size());
+  for (const auto& point : vertices) {
+      final_mesh->points.emplace_back(point.x, point.y, point.z);
+  }
+
+  // Copy faces (this part was already correct)
+  final_mesh->faces.reserve(triangles.polygons.size());
+  for (const auto& polygon : triangles.polygons) {
+    if (polygon.vertices.size() != 3) continue;
+    spark_dsg::Mesh::Face face;
+    face[0] = polygon.vertices[0];
+    face[1] = polygon.vertices[1];
+    face[2] = polygon.vertices[2];
+    final_mesh->faces.push_back(face);
+  }
+
+  return final_mesh;
 }
 
 }  // namespace hydra

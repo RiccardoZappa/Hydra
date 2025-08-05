@@ -46,6 +46,11 @@
 #include <opencv2/core/hal/interface.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/search/kdtree.h>
+#include <pcl/PolygonMesh.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/conversions.h>
+
 #include <spark_dsg/dynamic_scene_graph_layer.h>
 #include <chrono>
 #include <ratio>
@@ -262,16 +267,56 @@ void FrontendModule::save(const LogSetup& log_setup) {
 
       // check the point cloud attribute existance
       if (attrs.point_cloud && !attrs.point_cloud->empty()) {
-        std::filesystem::path cloud_filepath = std::filesystem::path(objects_pcd_path) / (NodeSymbol(node.id).getLabel() + ".pcd");
         
-        // Save the point cloud to a .pcd file
+        std::string filename = attrs.name + "_" + std::to_string(node.id) + ".pcd";
+        std::filesystem::path cloud_filepath = std::filesystem::path(objects_pcd_path) / filename;
+        
+        // Passage 7: Save the point cloud to a .pcd file.
         if (pcl::io::savePCDFileASCII(cloud_filepath.string(), *attrs.point_cloud) == 0) {
-            VLOG(3) << "Saved object " << NodeSymbol(node.id).getLabel() << " point cloud to " << cloud_filepath.string();
+          VLOG(3) << "Saved object point cloud to " << cloud_filepath.string();
         } else {
-            LOG(ERROR) << "Failed to save object " << NodeSymbol(node.id).getLabel() << " point cloud.";
+          LOG(ERROR) << "Failed to save object point cloud to " << cloud_filepath.string();
         }
       }
     }
+  }
+
+  const auto objects_mesh_path = log_setup.getLogDir("object_meshes");
+  LOG(INFO) << "Saving object meshes to " << objects_mesh_path;
+
+  if (dsg_->graph->hasLayer(DsgLayers::OBJECTS)) {
+      for (const auto& id_node_pair : dsg_->graph->getLayer(DsgLayers::OBJECTS).nodes()) {
+        const auto& node = *id_node_pair.second;
+        const auto& attrs = node.attributes<ObjectNodeAttributes>();
+
+        if (attrs.mesh && !attrs.mesh->empty()) {
+          pcl::PointCloud<pcl::PointXYZ> vertices;
+          vertices.points.reserve(attrs.mesh->points.size());
+          for (const auto& point : attrs.mesh->points) {
+              vertices.points.emplace_back(point.x(), point.y(), point.z());
+          }
+
+          // 2. Create a PCL-compatible vector of faces.
+          // The traits system knows how to handle std::vector<pcl::Vertices>.
+          std::vector<pcl::Vertices> faces;
+          faces.reserve(attrs.mesh->faces.size());
+          for (const auto& face : attrs.mesh->faces) {
+              pcl::Vertices v;
+              v.vertices.push_back(face[0]);
+              v.vertices.push_back(face[1]);
+              v.vertices.push_back(face[2]);
+              faces.push_back(v);
+          }
+          // --- END DATA PREPARATION ---
+
+          std::string filename = attrs.name + "_" + std::to_string(node.id) + ".ply";
+          std::filesystem::path mesh_filepath = std::filesystem::path(objects_mesh_path) / filename;
+          
+          // Now, call the WriteMesh overload that takes vertices and faces separately.
+          // This call will succeed because it matches the library's expected types.
+          kimera_pgmo::WriteMesh(mesh_filepath.string(), vertices, faces);
+        }
+      }
   }
 
   if (freespace_places_) {
