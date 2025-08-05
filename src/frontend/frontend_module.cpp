@@ -253,7 +253,7 @@ void FrontendModule::save(const LogSetup& log_setup) {
   const auto objects_pcd_path = log_setup.getLogDir("object_point_clouds");
   LOG(INFO) << "Saving object point clouds to " << objects_pcd_path;
 
-  // using the dsg graph to check if it has a object layer and iterate over the objects nodes
+  // using the dsg graph to check if it has a object layer and iterate over the objects 
   if (dsg_->graph->hasLayer(DsgLayers::OBJECTS)) {
 
     for (const auto& id_node_pair : dsg_->graph->getLayer(DsgLayers::OBJECTS).nodes()) {
@@ -262,13 +262,13 @@ void FrontendModule::save(const LogSetup& log_setup) {
 
       // check the point cloud attribute existance
       if (attrs.point_cloud && !attrs.point_cloud->empty()) {
-        std::filesystem::path cloud_filepath = objects_pcd_path / (node.id.getLabel() + ".pcd");
+        std::filesystem::path cloud_filepath = std::filesystem::path(objects_pcd_path) / (NodeSymbol(node.id).getLabel() + ".pcd");
         
         // Save the point cloud to a .pcd file
         if (pcl::io::savePCDFileASCII(cloud_filepath.string(), *attrs.point_cloud) == 0) {
-            VLOG(3) << "Saved object " << node.id.getLabel() << " point cloud to " << cloud_filepath.string();
+            VLOG(3) << "Saved object " << NodeSymbol(node.id).getLabel() << " point cloud to " << cloud_filepath.string();
         } else {
-            LOG(ERROR) << "Failed to save object " << node.id.getLabel() << " point cloud.";
+            LOG(ERROR) << "Failed to save object " << NodeSymbol(node.id).getLabel() << " point cloud.";
         }
       }
     }
