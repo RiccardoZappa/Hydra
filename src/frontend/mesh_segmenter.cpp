@@ -721,6 +721,26 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
   attrs.instance_views.addView(cluster.mask.map_view_id, assigned_view);
 
   mergeList(attrs.mesh_connections, cluster.indices);
+
+  // improve the point cloud for each node merging over time
+  *(attrs.point_cloud) += cluster.mesh;
+
+  // Downsample the fused cloud to prevent it from growing
+
+  pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
+
+
+  voxel_filter.setInputCloud(attrs.point_cloud);
+  // leaf size is taken from the config
+  voxel_filter.setLeafSize(config.processing_grid_size,
+                           config.processing_grid_size,
+                           config.processing_grid_size); 
+  voxel_filter.filter(*temp_cloud);
+
+  //swap the node attribut point cloud with the filtered one
+  attrs.point_cloud.swap(temp_cloud);
+
   updateObjectGeometry(*graph.mesh(), attrs);
 }
 
@@ -755,6 +775,10 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
   mask_to_assign = std::make_shared<cv::Mat>(cluster.mask.mask);
   View assigned_view(cluster.mask.mask_id, *mask_to_assign);
   attrs->instance_views.addView(cluster.mask.map_view_id, assigned_view);
+
+  // add the point cloud to node attributes
+  attrs->point_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
+  *(attrs->point_cloud) = cluster.mesh;
 
   std::shared_ptr<SemanticColorMap> label_map =
       GlobalInfo::instance().getSemanticColorMap();
