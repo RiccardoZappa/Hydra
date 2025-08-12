@@ -46,6 +46,7 @@
 #include "hydra/common/output_sink.h"
 #include "hydra/input/input_data.h"
 #include "hydra/reconstruction/reconstruction_output.h"
+#include "hydra/reconstruction/mesh_integrator_config.h"
 
 namespace kimera_pgmo {
 class MeshDelta;
@@ -59,6 +60,8 @@ struct Cluster {
   pcl::PointCloud<pcl::PointXYZRGBA> mesh;
   MaskData mask;
 };
+
+class MeshIntegrator;
 
 using LabelIndices = std::map<uint32_t, std::vector<size_t>>;
 
@@ -90,9 +93,11 @@ class MeshSegmenter {
     float nodes_match_iou_threshold = 0.5;
     bool merge_active_nodes = false;
     float close_to_cloud_threshold = 0.025;
+    MeshIntegratorConfig mesh_integrator_config;
   } const config;
 
   explicit MeshSegmenter(const Config& config);
+  ~MeshSegmenter();
 
   LabelClusters detect(const ReconstructionOutput& input,
                        uint64_t timestamp_ns,
@@ -102,7 +107,8 @@ class MeshSegmenter {
   void updateGraph(uint64_t timestamp,
                    const LabelClusters& clusters,
                    size_t num_archived_vertices,
-                   DynamicSceneGraph& graph);
+                   DynamicSceneGraph& graph,
+                   const Eigen::Isometry3d& sensor_pose);
 
   std::unordered_set<NodeId> getActiveNodes() const;
 
@@ -112,21 +118,23 @@ class MeshSegmenter {
   void addNodeToGraph(DynamicSceneGraph& graph,
                       const Cluster& cluster,
                       uint32_t label,
-                      uint64_t timestamp);
+                      uint64_t timestamp,
+                      const Eigen::Isometry3d& sensor_pose);
 
   void updateNodeInGraph(DynamicSceneGraph& graph,
                          const Cluster& cluster,
                          const SceneGraphNode& node,
-                         uint64_t timestamp);
+                         uint64_t timestamp,
+                         const Eigen::Isometry3d& sensor_pose);
 
   void mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label);
-
-  spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud);
 
  private:
   NodeSymbol next_node_id_;
   std::map<uint32_t, std::set<NodeId>> active_nodes_;
   Sink::List sinks_;
+  std::unordered_map<NodeId, std::unique_ptr<VolumetricMap>> object_tsdf_map_;
+  std::unique_ptr<hydra::MeshIntegrator> mesh_integrator_;
 };
 
 using Clusters = MeshSegmenter::Clusters;
@@ -273,5 +281,12 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
                               const int64& class_id,
                               const ClassToInstance& class_to_instance,
                               std::unordered_set<size_t>& registered_indices);
+
+spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud);
+
+void integratePoints(hydra::VolumetricMap& local_tsdf,
+                     const Eigen::Vector3d& object_centroid_world,
+                     const pcl::PointCloud<pcl::PointXYZRGBA>& new_points_world,
+                     const Eigen::Isometry3d& world_T_sensor); 
 
 }  // namespace hydra

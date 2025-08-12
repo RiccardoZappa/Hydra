@@ -65,6 +65,7 @@
 #include <pcl/features/normal_3d.h>
 #include <pcl/surface/gp3.h>
 #include <pcl/conversions.h>
+#include <pcl/common/transforms.h>
 #include <config_utilities/config.h>
 #include <config_utilities/types/conversions.h>
 #include <config_utilities/types/enum.h>
@@ -75,6 +76,7 @@
 #include "hydra/common/semantic_color_map.h"
 #include "hydra/utils/mesh_utilities.h"
 #include "hydra/utils/timing_utilities.h"
+#include "hydra/reconstruction/mesh_integrator.h"
 
 namespace hydra {
 
@@ -113,6 +115,7 @@ void declare_config(MeshSegmenter::Config& config) {
   field(config.nodes_match_iou_threshold, "nodes_match_iou_threshold");
   field(config.merge_active_nodes, "merge_active_nodes");
   field(config.close_to_cloud_threshold, "close_to_cloud_threshold");
+  field(config.mesh_integrator_config, "mesh");
 }
 
 template <typename LList, typename RList>
@@ -519,12 +522,15 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
 MeshSegmenter::MeshSegmenter(const Config& config)
     : config(config::checkValid(config)),
       next_node_id_(config.prefix, 0),
-      sinks_(Sink::instantiate(config.sinks)) {
+      sinks_(Sink::instantiate(config.sinks)),
+      mesh_integrator_(std::make_unique<MeshIntegrator>(config.mesh_integrator_config)) {
   VLOG(2) << "[Mesh Segmenter] using labels: " << printLabels(config.labels);
   for (const auto& label : config.labels) {
     active_nodes_[label] = std::set<NodeId>();
   }
 }
+
+MeshSegmenter::~MeshSegmenter() = default;
 
 LabelClusters MeshSegmenter::detect(const ReconstructionOutput& input,
                                     uint64_t timestamp_ns,
@@ -615,7 +621,8 @@ void MeshSegmenter::archiveOldNodes(const DynamicSceneGraph& graph,
 void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
                                 const LabelClusters& clusters,
                                 size_t num_archived_vertices,
-                                DynamicSceneGraph& graph) {
+                                DynamicSceneGraph& graph,
+                                const Eigen::Isometry3d& sensor_pose) {
   ScopedTimer timer(config.timer_namespace + "_graph_update", timestamp_ns);
   archiveOldNodes(graph, num_archived_vertices);
 
@@ -632,7 +639,7 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
         }
       }
       if (!matches_prev_node) {
-        addNodeToGraph(graph, cluster, label, timestamp_ns);
+        addNodeToGraph(graph, cluster, label, timestamp_ns,sensor_pose);
       } else {
         float min_dist = std::numeric_limits<float>::max();
         NodeId assigned_id = std::numeric_limits<NodeId>::max();
@@ -645,7 +652,7 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
           }
         }
         if (assigned_id != std::numeric_limits<NodeId>::max()) {
-          updateNodeInGraph(graph, cluster, graph.getNode(assigned_id), timestamp_ns);
+          updateNodeInGraph(graph, cluster, graph.getNode(assigned_id), timestamp_ns, sensor_pose);
         }
       }
       if (config.merge_active_nodes) {
@@ -713,7 +720,8 @@ std::unordered_set<NodeId> MeshSegmenter::getActiveNodes() const {
 void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
                                       const Cluster& cluster,
                                       const SceneGraphNode& node,
-                                      uint64_t timestamp) {
+                                      uint64_t timestamp,
+                                      const Eigen::Isometry3d& sensor_pose) {
   auto& attrs = node.attributes<ObjectNodeAttributes>();
   attrs.last_update_time_ns = timestamp;
   attrs.is_active = true;
@@ -744,7 +752,36 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
   //swap the node attribut point cloud with the filtered one
   attrs.point_cloud.swap(temp_cloud);
 
-  attrs.mesh = generateMeshFromCloud(attrs.point_cloud);
+  // attrs.mesh = generateMeshFromCloud(attrs.point_cloud);
+
+  if (object_tsdf_map_.count(node.id)) {
+    auto& local_tsdf = object_tsdf_map_.at(node.id);
+    
+    // Dereference the unique_ptr with '*' to pass a reference
+    integratePoints(*local_tsdf, attrs.world_centroid, *attrs.point_cloud, sensor_pose);
+    
+    LOG(INFO) << "points integrated ";
+    // Use the dot '.' operator because attrs is a reference
+    // Construct mesh with colors enabled
+    attrs.mesh.reset(new spark_dsg::Mesh(true, false, false, true));
+    local_tsdf->getMeshLayer().clear();
+    mesh_integrator_->generateMesh(*local_tsdf, false, false);
+    
+    const auto& mesh_layer = local_tsdf->getMeshLayer();
+    for (const auto& block : mesh_layer) {
+        const size_t num_vertices_before = attrs.mesh->points.size();
+        attrs.mesh->points.insert(attrs.mesh->points.end(), block.points.begin(), block.points.end());
+        if (block.has_colors) {
+            attrs.mesh->colors.insert(attrs.mesh->colors.end(), block.colors.begin(), block.colors.end());
+        }
+        for (auto face : block.faces) {
+            face[0] += num_vertices_before;
+            face[1] += num_vertices_before;
+            face[2] += num_vertices_before;
+            attrs.mesh->faces.push_back(face);
+        }
+    }
+  }
 
   updateObjectGeometry(*graph.mesh(), attrs);
 }
@@ -752,7 +789,8 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
 void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
                                    const Cluster& cluster,
                                    uint32_t label,
-                                   uint64_t timestamp) {
+                                   uint64_t timestamp,
+                                   const Eigen::Isometry3d& sensor_pose) {
   if (cluster.indices.empty()) {
     LOG(ERROR) << "Encountered empty cluster with label" << static_cast<int>(label)
                << " @ " << timestamp << "[ns]";
@@ -786,7 +824,40 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
   *(attrs->point_cloud) = cluster.mesh;
 
   // add the created mesh from the point cloud to the object node
-  attrs->mesh = generateMeshFromCloud(attrs->point_cloud);
+  // attrs->mesh = generateMeshFromCloud(attrs->point_cloud);
+
+  attrs->world_centroid = cluster.centroid;
+  
+  VolumetricMap::Config map_config;
+  map_config.voxel_size = 0.01;
+  map_config.voxels_per_side = 16;
+  map_config.truncation_distance = 3.0f * map_config.voxel_size;
+  auto local_tsdf = std::make_unique<VolumetricMap>(map_config);
+  
+  integratePoints(*local_tsdf, attrs->world_centroid, *attrs->point_cloud, sensor_pose);
+
+  // Construct mesh with colors enabled to fix the read-only member error
+  attrs->mesh.reset(new spark_dsg::Mesh(true, false, false, true));
+  
+  local_tsdf->getMeshLayer().clear();
+  mesh_integrator_->generateMesh(*local_tsdf, false, false);
+  
+  const auto& mesh_layer = local_tsdf->getMeshLayer();
+  for (const auto& block : mesh_layer) {
+      const size_t num_vertices_before = attrs->mesh->points.size();
+      attrs->mesh->points.insert(attrs->mesh->points.end(), block.points.begin(), block.points.end());
+      if (block.has_colors) {
+          attrs->mesh->colors.insert(attrs->mesh->colors.end(), block.colors.begin(), block.colors.end());
+      }
+      for (auto face : block.faces) {
+          face[0] += num_vertices_before;
+          face[1] += num_vertices_before;
+          face[2] += num_vertices_before;
+          attrs->mesh->faces.push_back(face);
+      }
+  }
+
+  object_tsdf_map_[next_node_id_] = std::move(local_tsdf);
 
   std::shared_ptr<SemanticColorMap> label_map =
       GlobalInfo::instance().getSemanticColorMap();
@@ -804,7 +875,7 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
   ++next_node_id_;
 }
 
-spark_dsg::Mesh::Ptr MeshSegmenter::generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud) {
+spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud) {
   // won't mesh a very small or invalid point cloud.
 if (!cloud || cloud->size() < 20) {
     LOG(INFO) << "Meshing failed: Input cloud is too small or null. Size: "
@@ -836,9 +907,9 @@ if (!cloud || cloud->size() < 20) {
   pcl::GreedyProjectionTriangulation<pcl::PointNormal> gp3;
   pcl::PolygonMesh triangles;
 
-  gp3.setSearchRadius(0.15); // Increased radius, TUNE THIS
+  gp3.setSearchRadius(0.3); // Increased radius, TUNE THIS
   gp3.setMu(2.5);
-  gp3.setMaximumNearestNeighbors(100);
+  gp3.setMaximumNearestNeighbors(250);
   gp3.setMinimumAngle(M_PI / 18);
   gp3.setMaximumAngle(2 * M_PI / 3);
   gp3.setNormalConsistency(false);
@@ -880,4 +951,45 @@ if (!cloud || cloud->size() < 20) {
   return final_mesh;
 }
 
+void integratePoints(hydra::VolumetricMap& local_tsdf,
+                     const Eigen::Vector3d& object_centroid_world,
+                     const pcl::PointCloud<pcl::PointXYZRGBA>& new_points_world,
+                     const Eigen::Isometry3d& world_T_sensor) {
+
+  Eigen::Affine3d object_T_world(Eigen::Translation3d(-object_centroid_world));
+
+  pcl::PointCloud<pcl::PointXYZRGBA> points_local;
+  pcl::transformPointCloud(new_points_world, points_local, object_T_world.cast<float>());
+
+  spatial_hash::Point sensor_origin_local = (object_T_world * world_T_sensor.translation()).cast<float>();
+
+  const float voxel_size = local_tsdf.config.voxel_size;
+  const float trunc_dist = local_tsdf.config.truncation_distance;
+  
+  for (const auto& point : points_local.points) {
+    const spatial_hash::Point point_local = point.getVector3fMap();
+    const float ray_length = (point_local - sensor_origin_local).norm();
+    if (ray_length < 1.0e-4) continue;
+
+    const spatial_hash::Point ray_direction = (point_local - sensor_origin_local) / ray_length;
+    
+    for (float current_dist = 0.f; current_dist < ray_length + trunc_dist; current_dist += voxel_size) {
+      const spatial_hash::Point current_pos = sensor_origin_local + ray_direction * current_dist;
+      
+      const spatial_hash::BlockIndex block_index = 
+      local_tsdf.getTsdfLayer().getBlockIndex(current_pos);
+
+      auto block = local_tsdf.getTsdfLayer().allocateBlockPtr(block_index);
+      if (!block) continue;
+
+      hydra::TsdfVoxel& voxel = block->getVoxel(block->getVoxelIndex(current_pos));
+      const float sdf = ray_length - current_dist;
+      if (sdf < -trunc_dist) continue;
+
+      const float truncated_sdf = std::max(-trunc_dist, std::min(trunc_dist, sdf));
+      voxel.distance = (voxel.distance * voxel.weight + truncated_sdf) / (voxel.weight + 1.0f);
+      voxel.weight = std::min(voxel.weight + 1.0f, 20.0f);
+    }
+  }
+}
 }  // namespace hydra

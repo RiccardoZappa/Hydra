@@ -521,12 +521,16 @@ void FrontendModule::updateObjects(const ReconstructionOutput& input) {
   const auto clusters =
       segmenter_->detect(input, input.timestamp_ns, *last_mesh_update_, std::nullopt);
 
+  // Get the sensor pose from the input data packet.
+  const Eigen::Isometry3d sensor_pose = input.sensor_data->getSensorPose();
+
   {  // start dsg critical section
     std::unique_lock<std::mutex> lock(dsg_->mutex);
     segmenter_->updateGraph(input.timestamp_ns,
                             clusters,
                             last_mesh_update_->getTotalArchivedVertices(),
-                            *dsg_->graph);
+                            *dsg_->graph,
+                            sensor_pose);
     // checkObjectsInViewFrustum(input);
     addPlaceObjectEdges(input.timestamp_ns);
   }  // end dsg critical section
