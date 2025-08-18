@@ -281,43 +281,23 @@ void FrontendModule::save(const LogSetup& log_setup) {
     }
   }
 
-  const auto objects_mesh_path = log_setup.getLogDir("object_meshes");
-  LOG(INFO) << "Saving object meshes to " << objects_mesh_path;
+  // const auto objects_mesh_path = log_setup.getLogDir("object_meshes");
+  // LOG(INFO) << "Saving object meshes to " << objects_mesh_path;
 
-  if (dsg_->graph->hasLayer(DsgLayers::OBJECTS)) {
-      for (const auto& id_node_pair : dsg_->graph->getLayer(DsgLayers::OBJECTS).nodes()) {
-        const auto& node = *id_node_pair.second;
-        const auto& attrs = node.attributes<ObjectNodeAttributes>();
+  // if (dsg_->graph->hasLayer(DsgLayers::OBJECTS)) {
+  //     for (const auto& id_node_pair : dsg_->graph->getLayer(DsgLayers::OBJECTS).nodes()) {
+  //       const auto& node = *id_node_pair.second;
+  //       const auto& attrs = node.attributes<ObjectNodeAttributes>();
 
-        if (attrs.mesh && !attrs.mesh->empty()) {
-          pcl::PointCloud<pcl::PointXYZ> vertices;
-          vertices.points.reserve(attrs.mesh->points.size());
-          for (const auto& point : attrs.mesh->points) {
-              vertices.points.emplace_back(point.x(), point.y(), point.z());
-          }
-
-          // 2. Create a PCL-compatible vector of faces.
-          // The traits system knows how to handle std::vector<pcl::Vertices>.
-          std::vector<pcl::Vertices> faces;
-          faces.reserve(attrs.mesh->faces.size());
-          for (const auto& face : attrs.mesh->faces) {
-              pcl::Vertices v;
-              v.vertices.push_back(face[0]);
-              v.vertices.push_back(face[1]);
-              v.vertices.push_back(face[2]);
-              faces.push_back(v);
-          }
-          // --- END DATA PREPARATION ---
-
-          std::string filename = attrs.name + "_" + std::to_string(node.id) + ".ply";
-          std::filesystem::path mesh_filepath = std::filesystem::path(objects_mesh_path) / filename;
+  //       if (attrs.mesh && !attrs.mesh->empty()) {
+  //         std::string filename = attrs.name + "_" + std::to_string(node.id) + ".ply";
+  //         std::filesystem::path mesh_filepath = std::filesystem::path(objects_mesh_path) / filename;
           
-          // Now, call the WriteMesh overload that takes vertices and faces separately.
-          // This call will succeed because it matches the library's expected types.
-          kimera_pgmo::WriteMesh(mesh_filepath.string(), vertices, faces);
-        }
-      }
-  }
+  //         // Now, call the WriteMesh overload that takes vertices and faces separately.
+  //         kimera_pgmo::WriteMesh(mesh_filepath.string(), *attrs.mesh);
+  //       }
+  //     }
+  // }
 
   if (freespace_places_) {
     freespace_places_->save(log_setup);
@@ -521,16 +501,13 @@ void FrontendModule::updateObjects(const ReconstructionOutput& input) {
   const auto clusters =
       segmenter_->detect(input, input.timestamp_ns, *last_mesh_update_, std::nullopt);
 
-  // Get the sensor pose from the input data packet.
-  const Eigen::Isometry3d sensor_pose = input.sensor_data->getSensorPose();
-
   {  // start dsg critical section
     std::unique_lock<std::mutex> lock(dsg_->mutex);
     segmenter_->updateGraph(input.timestamp_ns,
                             clusters,
                             last_mesh_update_->getTotalArchivedVertices(),
                             *dsg_->graph,
-                            sensor_pose);
+                            input);
     // checkObjectsInViewFrustum(input);
     addPlaceObjectEdges(input.timestamp_ns);
   }  // end dsg critical section

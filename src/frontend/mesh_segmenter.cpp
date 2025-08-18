@@ -66,6 +66,7 @@
 #include <pcl/surface/gp3.h>
 #include <pcl/conversions.h>
 #include <pcl/common/transforms.h>
+#include <pcl/registration/icp.h>
 #include <config_utilities/config.h>
 #include <config_utilities/types/conversions.h>
 #include <config_utilities/types/enum.h>
@@ -467,6 +468,66 @@ ClassToInstance computeInstancesClouds(const ReconstructionOutput& input,
   return cls_to_instance;
 }
 
+pcl::PointCloud<pcl::PointXYZRGBA>::Ptr generateHighResPointCloud(const hydra::InputData& sensor_data,
+                                                                  const hydra::MaskData& mask_data,
+                                                                  MeshSegmenter::Config config){
+
+  const cv::Mat& vertex_map = sensor_data.vertex_map;
+  const cv::Mat& color_image = sensor_data.color_image;
+  const Eigen::Isometry3d& world_T_sensor = sensor_data.getSensorPose();
+
+  // MeshCloud::Ptr cloud_sensor_frame(new MeshCloud);
+
+  // // --- 2. Build High-Res Cloud in the SENSOR's Frame from the Mask ---
+  // for (int r = 0; r < mask_data.mask.rows; ++r) {
+  //   for (int c = 0; c < mask_data.mask.cols; ++c) {
+  //     if (mask_data.mask.at<uint8_t>(r, c) != 0) {
+  //       const auto& point_cv = vertex_map.at<cv::Vec3f>(r, c);
+  //       if (std::isnan(point_cv[0])) continue;
+
+  //       CloudPoint p;
+  //       p.x = point_cv[0]; p.y = point_cv[1]; p.z = point_cv[2];
+  //       const auto& color = color_image.at<cv::Vec3b>(r, c);
+  //       p.b = color[0]; p.g = color[1]; p.r = color[2]; p.a = 255;
+  //       cloud_sensor_frame->push_back(p);
+  //     }
+  //   }
+  // }
+
+  const int& rows = vertex_map.size().height;
+  const int& cols = vertex_map.size().width;
+
+  MeshCloud::Ptr cloud_sensor_frame(new MeshCloud);
+  for (int r = 0; r < rows; r++) {
+    for (int c = 0; c < cols; c++) {
+      if (mask_data.mask.at<uint8_t>(r, c) != 0) {
+        auto point = vertex_map.at<cv::Vec3f>(r, c);
+        CloudPoint cloud_point;
+        cloud_point.x = point[0];
+        cloud_point.y = point[1];
+        cloud_point.z = point[2];
+        cloud_sensor_frame->push_back(cloud_point);
+     }
+   }
+  }
+
+  if (cloud_sensor_frame->empty()) {
+    return nullptr;
+  }
+
+  std::vector<int> nan_indices;
+  pcl::removeNaNFromPointCloud(*cloud_sensor_frame, *cloud_sensor_frame, nan_indices);
+
+  if (cloud_sensor_frame->empty()) {
+    return nullptr; 
+  }
+
+  MeshCloud::Ptr cloud_floor_rm = removeFloor(cloud_sensor_frame, config.min_mesh_z);
+  MeshCloud::Ptr cloud_filtered = cloudStatisticalOutlierRemoval(cloud_floor_rm, 50, 2.0);
+
+  return cloud_filtered;
+}
+
 Clusters findInstanceClusters(const MeshSegmenter::Config& config,
                               const kimera_pgmo::MeshDelta& delta,
                               const std::vector<size_t>& indices,
@@ -608,6 +669,8 @@ void MeshSegmenter::archiveOldNodes(const DynamicSceneGraph& graph,
 
       attrs.is_active = is_active;
       if (!attrs.is_active) {
+        VLOG(1) << "!!! De-activating node " << node_id << " ('" << attrs.name 
+          << "') because its mesh connections are old. THIS IS THE PROBLEM!";
         removed_nodes.push_back(node_id);
       }
     }
@@ -622,92 +685,149 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
                                 const LabelClusters& clusters,
                                 size_t num_archived_vertices,
                                 DynamicSceneGraph& graph,
-                                const Eigen::Isometry3d& sensor_pose) {
+                                const ReconstructionOutput& input) {
   ScopedTimer timer(config.timer_namespace + "_graph_update", timestamp_ns);
   archiveOldNodes(graph, num_archived_vertices);
 
   for (auto&& [label, clusters_for_label] : clusters) {
     for (const auto& cluster : clusters_for_label) {
-      bool matches_prev_node = false;
-      std::vector<NodeId> nodes_not_in_graph;
-      std::vector<NodeId> match_candidates;
-      for (const auto& prev_node_id : active_nodes_.at(label)) {
-        const auto& prev_node = graph.getNode(prev_node_id);
-        if (nodesMatch(cluster, prev_node, config)) {
-          match_candidates.push_back(prev_node_id);
-          matches_prev_node = true;
-        }
-      }
-      if (!matches_prev_node) {
-        addNodeToGraph(graph, cluster, label, timestamp_ns,sensor_pose);
-      } else {
-        float min_dist = std::numeric_limits<float>::max();
-        NodeId assigned_id = std::numeric_limits<NodeId>::max();
-        for (const auto& node_id : match_candidates) {
-          const auto& prev_node = graph.getNode(node_id);
-          float distance = (prev_node.attributes().position - cluster.centroid).norm();
-          if (distance < min_dist) {
-            min_dist = distance;
-            assigned_id = node_id;
+
+      NodeId best_match_id = 0;
+      float min_dist = std::numeric_limits<float>::max();
+
+      const Eigen::Vector3d& new_detection_position = cluster.centroid; //use the cluster centroid to perform nodes match
+
+      // Compare against the stable positions of existing nodes
+      if (active_nodes_.count(label)) {
+          for (const auto& node_id : active_nodes_.at(label)) {
+              if (!graph.hasNode(node_id)) continue;
+              const auto& node_attrs = graph.getNode(node_id).attributes<ObjectNodeAttributes>();
+              
+              float distance = (node_attrs.position - new_detection_position).norm();
+              if (distance < min_dist) {
+                  min_dist = distance;
+                  best_match_id = node_id;
+              }
           }
-        }
-        if (assigned_id != std::numeric_limits<NodeId>::max()) {
-          updateNodeInGraph(graph, cluster, graph.getNode(assigned_id), timestamp_ns, sensor_pose);
-        }
       }
+
+      const float matching_threshold = 0.5f; // can be customizable
+      bool match_found = (best_match_id != 0 && min_dist < matching_threshold);
+
+      MeshCloud::Ptr high_res_cloud = generateHighResPointCloud(*input.sensor_data, cluster.mask, config);
+      if (!high_res_cloud || high_res_cloud->empty()) {
+          continue; // Skip if the high-res cloud is invalid
+      }
+
+      if (match_found) {
+          updateNodeInGraph(graph, 
+                            cluster, 
+                            graph.getNode(best_match_id), 
+                            timestamp_ns, 
+                            input.sensor_data->getSensorPose(), 
+                            high_res_cloud);
+      } else {
+          addNodeToGraph(graph, 
+                        cluster, 
+                        label, 
+                        timestamp_ns, 
+                        input.sensor_data->getSensorPose(), 
+                        high_res_cloud);
+      }
+
       if (config.merge_active_nodes) {
-        mergeActiveNodes(graph, label);
+          mergeActiveNodes(graph, label);
       }
     }
   }
 }
 
 void MeshSegmenter::mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label) {
-  std::set<NodeId> merged_nodes;
+    VLOG(0) << "--- Starting Global Merge Check for Label " << label << " ---";
 
-  auto& curr_active = active_nodes_.at(label);
-  for (const auto& node_id : curr_active) {
-    if (merged_nodes.count(node_id)) {
-      continue;
+    bool merged_in_pass = true;
+    while (merged_in_pass) {
+        merged_in_pass = false;
+        
+        auto& active_nodes = active_nodes_.at(label);
+        if (active_nodes.size() < 2) {
+            break; // Nothing to merge
+        }
+
+        std::vector<NodeId> nodes_to_check(active_nodes.begin(), active_nodes.end());
+        std::map<NodeId, NodeId> merge_map; 
+        
+        for (size_t i = 0; i < nodes_to_check.size(); ++i) {
+            for (size_t j = i + 1; j < nodes_to_check.size(); ++j) {
+                NodeId node_id_a = nodes_to_check[i];
+                NodeId node_id_b = nodes_to_check[j];
+                // Resolve chains to their roots before checking
+                while (merge_map.count(node_id_a)) { node_id_a = merge_map[node_id_a]; }
+                while (merge_map.count(node_id_b)) { node_id_b = merge_map[node_id_b]; }
+                if (node_id_a == node_id_b) continue;
+
+                if (!graph.hasNode(node_id_a) || !graph.hasNode(node_id_b)) continue;
+                
+                auto& attrs_a = graph.getNode(node_id_a).attributes<ObjectNodeAttributes>();
+                auto& attrs_b = graph.getNode(node_id_b).attributes<ObjectNodeAttributes>();
+
+                float distance = (attrs_a.position - attrs_b.position).norm();
+                if (distance < 1.5) { // distance can be customizable
+                    if (attrs_a.point_cloud->size() < attrs_b.point_cloud->size()) {
+                        merge_map[node_id_a] = node_id_b;
+                    } else {
+                        merge_map[node_id_b] = node_id_a;
+                    }
+                    merged_in_pass = true;
+                }
+            }
+        }
+        
+        if (!merged_in_pass) {
+            break; // No merges found 
+        }
+
+        for (auto const& [node_to_delete, target_node] : merge_map) {
+            if (!graph.hasNode(node_to_delete) || !graph.hasNode(target_node)) continue;
+            
+            auto& target_attrs = graph.getNode(target_node).attributes<ObjectNodeAttributes>();
+            auto& source_attrs = graph.getNode(node_to_delete).attributes<ObjectNodeAttributes>();
+            
+            VLOG(0) << "MERGING node " << node_to_delete << " into " << target_node;
+
+            // Merge the point clouds
+            if (source_attrs.point_cloud && !source_attrs.point_cloud->empty()) {
+                if (target_attrs.point_cloud) {
+                    *target_attrs.point_cloud += *source_attrs.point_cloud;
+                    
+                    MeshCloud::Ptr cloud_downsampled = downsampleCloud(target_attrs.point_cloud, 0.005f); // this should be customizable
+                    target_attrs.point_cloud.swap(cloud_downsampled); 
+                } else {
+                    target_attrs.point_cloud.reset(new MeshCloud(*source_attrs.point_cloud));
+                }
+            }
+            mergeList(target_attrs.mesh_connections, source_attrs.mesh_connections);
+            target_attrs.instance_views.mergeViews(source_attrs.instance_views);
+            
+            graph.removeNode(node_to_delete);
+            active_nodes.erase(node_to_delete);
+        }
+        
+        for (const auto& node_id : active_nodes) {
+            if (graph.hasNode(node_id)) {
+                auto& attrs = graph.getNode(node_id).attributes<ObjectNodeAttributes>();
+                VLOG(0) << "  - Updating geometry for merged node " << node_id;
+
+                updateObjectGeometry(*graph.mesh(), attrs); 
+                updateBoundingBoxFromPointCloud(attrs, attrs.bounding_box.type); // calculation of the correct bounding box based on denser pointcloud
+            }
+        }
+        VLOG(0) << "  - Completed a merge pass. Re-checking...";
     }
-    const auto& node = graph.getNode(node_id);
 
-    std::list<NodeId> to_merge;
-    for (const auto& other_id : curr_active) {
-      if (node_id == other_id) {
-        continue;
-      }
-
-      if (merged_nodes.count(other_id)) {
-        continue;
-      }
-
-      const auto& other = graph.getNode(other_id);
-      if (nodesMatch(node, other, config) || nodesMatch(other, node, config)) {
-        to_merge.push_back(other_id);
-      }
-    }
-
-    auto& attrs = node.attributes<ObjectNodeAttributes>();
-    for (const auto& other_id : to_merge) {
-      const auto& other = graph.getNode(other_id);
-      auto& other_attrs = other.attributes<ObjectNodeAttributes>();
-      // TODO: (phuoc) merge masks list
-      mergeList(attrs.mesh_connections, other_attrs.mesh_connections);
-      attrs.instance_views.mergeViews(other_attrs.instance_views);
-      graph.removeNode(other_id);
-      merged_nodes.insert(other_id);
-    }
-
-    if (!to_merge.empty()) {
-      updateObjectGeometry(*graph.mesh(), attrs);
-    }
-  }
-
-  for (const auto& node_id : merged_nodes) {
-    curr_active.erase(node_id);
-  }
+    VLOG(0) << "--- Finished Global Merge Check for Label " << label << ". Final active node count: " << active_nodes_.size() << " ---";
 }
+
 
 std::unordered_set<NodeId> MeshSegmenter::getActiveNodes() const {
   std::unordered_set<NodeId> active_nodes;
@@ -721,7 +841,8 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
                                       const Cluster& cluster,
                                       const SceneGraphNode& node,
                                       uint64_t timestamp,
-                                      const Eigen::Isometry3d& sensor_pose) {
+                                      const Eigen::Isometry3d& sensor_pose,
+                                      pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud) {
   auto& attrs = node.attributes<ObjectNodeAttributes>();
   attrs.last_update_time_ns = timestamp;
   attrs.is_active = true;
@@ -731,66 +852,62 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
   View assigned_view(cluster.mask.mask_id, *mask_to_assign);
   attrs.instance_views.addView(cluster.mask.map_view_id, assigned_view);
 
-  mergeList(attrs.mesh_connections, cluster.indices);
-
-  // improve the point cloud for each node merging over time
-  *(attrs.point_cloud) += cluster.mesh;
-
-  // Downsample the fused cloud to prevent it from growing
-
-  pcl::VoxelGrid<pcl::PointXYZRGBA> voxel_filter;
-  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZRGBA>());
-
-
-  voxel_filter.setInputCloud(attrs.point_cloud);
-  // leaf size is taken from the config
-  voxel_filter.setLeafSize(config.processing_grid_size,
-                           config.processing_grid_size,
-                           config.processing_grid_size); 
-  voxel_filter.filter(*temp_cloud);
-
-  //swap the node attribut point cloud with the filtered one
-  attrs.point_cloud.swap(temp_cloud);
-
-  // attrs.mesh = generateMeshFromCloud(attrs.point_cloud);
-
-  if (object_tsdf_map_.count(node.id)) {
-    auto& local_tsdf = object_tsdf_map_.at(node.id);
+  if (!high_res_cloud || high_res_cloud->empty()) {
+    return;
+  }
+  
+  if (attrs.point_cloud->empty()) {
+    *(attrs.point_cloud) = *high_res_cloud;
+  } else {
+    // Removing any NaN points from both clouds before alignment.
+    std::vector<int> nan_indices;
+    pcl::removeNaNFromPointCloud(*attrs.point_cloud, *attrs.point_cloud, nan_indices);
+    pcl::removeNaNFromPointCloud(*high_res_cloud, *high_res_cloud, nan_indices);
     
-    // Dereference the unique_ptr with '*' to pass a reference
-    integratePoints(*local_tsdf, attrs.world_centroid, *attrs.point_cloud, sensor_pose);
+    if (attrs.point_cloud->empty() || high_res_cloud->empty()) { // check again after the removal
+      if(attrs.point_cloud->empty()){
+        *(attrs.point_cloud) = *high_res_cloud;
+      }
+      return; 
+    }
     
-    LOG(INFO) << "points integrated ";
-    // Use the dot '.' operator because attrs is a reference
-    // Construct mesh with colors enabled
-    attrs.mesh.reset(new spark_dsg::Mesh(true, false, false, true));
-    local_tsdf->getMeshLayer().clear();
-    mesh_integrator_->generateMesh(*local_tsdf, false, false);
+    pcl::IterativeClosestPoint<CloudPoint, CloudPoint> icp;
+    icp.setInputSource(high_res_cloud); // The new scan
+    icp.setInputTarget(attrs.point_cloud); // The accumulated model
     
-    const auto& mesh_layer = local_tsdf->getMeshLayer();
-    for (const auto& block : mesh_layer) {
-        const size_t num_vertices_before = attrs.mesh->points.size();
-        attrs.mesh->points.insert(attrs.mesh->points.end(), block.points.begin(), block.points.end());
-        if (block.has_colors) {
-            attrs.mesh->colors.insert(attrs.mesh->colors.end(), block.colors.begin(), block.colors.end());
+    icp.setMaxCorrespondenceDistance(0.2); // i will have to tune this parameters (maybe can be customizable)
+    icp.setMaximumIterations(50);
+    
+    pcl::PointCloud<CloudPoint> final_aligned_cloud;
+    icp.align(final_aligned_cloud);
+    //bed, sofa max_fitens_score 0.005, 0.01 downsample
+    const float MAX_FITNESS_SCORE = 0.02; // Max allowable MSE (e.g., 0.01 m^2)
+    if (icp.hasConverged() && icp.getFitnessScore() < MAX_FITNESS_SCORE) {
+        *(attrs.point_cloud) += final_aligned_cloud;
+        if (!attrs.point_cloud->empty()) {
+          MeshCloud::Ptr cloud_downsampled = downsampleCloud(attrs.point_cloud, 0.005f); // this should be customizable as in updatenodegraph
+          attrs.point_cloud.swap(cloud_downsampled);
         }
-        for (auto face : block.faces) {
-            face[0] += num_vertices_before;
-            face[1] += num_vertices_before;
-            face[2] += num_vertices_before;
-            attrs.mesh->faces.push_back(face);
-        }
+    } else {
+        VLOG(0) << "ICP failed to converge or had poor fitness ("
+                << icp.getFitnessScore() << "). Discarding update for node " << node.id;
     }
   }
 
-  updateObjectGeometry(*graph.mesh(), attrs);
+  mergeList(attrs.mesh_connections, cluster.indices);
+
+  updateObjectGeometry(*graph.mesh(), attrs); 
+
+  // attrs.mesh = generateMeshFromCloud(attrs.point_cloud);
+  updateBoundingBoxFromPointCloud(attrs, attrs.bounding_box.type);
 }
 
 void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
                                    const Cluster& cluster,
                                    uint32_t label,
                                    uint64_t timestamp,
-                                   const Eigen::Isometry3d& sensor_pose) {
+                                   const Eigen::Isometry3d& sensor_pose,
+                                   pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud) {
   if (cluster.indices.empty()) {
     LOG(ERROR) << "Encountered empty cluster with label" << static_cast<int>(label)
                << " @ " << timestamp << "[ns]";
@@ -810,6 +927,9 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
     VLOG(2) << "Missing semantic label from map: " << std::to_string(label);
   }
 
+  attrs->point_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGBA>());
+  *(attrs->point_cloud) = *high_res_cloud;
+
   attrs->mesh_connections.insert(
       attrs->mesh_connections.begin(), cluster.indices.begin(), cluster.indices.end());
 
@@ -818,46 +938,6 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
   mask_to_assign = std::make_shared<cv::Mat>(cluster.mask.mask);
   View assigned_view(cluster.mask.mask_id, *mask_to_assign);
   attrs->instance_views.addView(cluster.mask.map_view_id, assigned_view);
-
-  // add the point cloud to node attributes
-  attrs->point_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGBA>());
-  *(attrs->point_cloud) = cluster.mesh;
-
-  // add the created mesh from the point cloud to the object node
-  // attrs->mesh = generateMeshFromCloud(attrs->point_cloud);
-
-  attrs->world_centroid = cluster.centroid;
-  
-  VolumetricMap::Config map_config;
-  map_config.voxel_size = 0.01;
-  map_config.voxels_per_side = 16;
-  map_config.truncation_distance = 3.0f * map_config.voxel_size;
-  auto local_tsdf = std::make_unique<VolumetricMap>(map_config);
-  
-  integratePoints(*local_tsdf, attrs->world_centroid, *attrs->point_cloud, sensor_pose);
-
-  // Construct mesh with colors enabled to fix the read-only member error
-  attrs->mesh.reset(new spark_dsg::Mesh(true, false, false, true));
-  
-  local_tsdf->getMeshLayer().clear();
-  mesh_integrator_->generateMesh(*local_tsdf, false, false);
-  
-  const auto& mesh_layer = local_tsdf->getMeshLayer();
-  for (const auto& block : mesh_layer) {
-      const size_t num_vertices_before = attrs->mesh->points.size();
-      attrs->mesh->points.insert(attrs->mesh->points.end(), block.points.begin(), block.points.end());
-      if (block.has_colors) {
-          attrs->mesh->colors.insert(attrs->mesh->colors.end(), block.colors.begin(), block.colors.end());
-      }
-      for (auto face : block.faces) {
-          face[0] += num_vertices_before;
-          face[1] += num_vertices_before;
-          face[2] += num_vertices_before;
-          attrs->mesh->faces.push_back(face);
-      }
-  }
-
-  object_tsdf_map_[next_node_id_] = std::move(local_tsdf);
 
   std::shared_ptr<SemanticColorMap> label_map =
       GlobalInfo::instance().getSemanticColorMap();
@@ -868,7 +948,9 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
 
   attrs->color = label_map->getColorFromLabel(label);
 
-  updateObjectGeometry(*graph.mesh(), *attrs, nullptr, config.bounding_box_type);
+  attrs->position = cluster.centroid; 
+
+  updateBoundingBoxFromPointCloud(*attrs,config.bounding_box_type);
 
   graph.emplaceNode(config.layer_id, next_node_id_, std::move(attrs));
   active_nodes_.at(label).insert(next_node_id_);
@@ -877,13 +959,13 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
 
 spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud) {
   // won't mesh a very small or invalid point cloud.
-if (!cloud || cloud->size() < 20) {
+  if (!cloud || cloud->size() < 20) {
     LOG(INFO) << "Meshing failed: Input cloud is too small or null. Size: "
               << (cloud ? cloud->size() : 0);
     return nullptr;
   }
 
-  // 2. --- Estimate Surface Normals ---
+  // --- Estimate Surface Normals ---
   pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
   pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
   tree->setInputCloud(cloud);
@@ -894,8 +976,7 @@ if (!cloud || cloud->size() < 20) {
   n.setKSearch(30);
   n.compute(*normals);
 
-  // 3. --- Combine Points and Normals ---
-  // **FIX:** Instead of concatenateFields, we now manually combine the XYZ and Normal data.
+  // --- Combine Points and Normals ---
   pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
   pcl::copyPointCloud(*cloud, *cloud_with_normals); // Copies the XYZ data
   pcl::copyPointCloud(*normals, *cloud_with_normals); // Copies the Normal data
@@ -907,7 +988,7 @@ if (!cloud || cloud->size() < 20) {
   pcl::GreedyProjectionTriangulation<pcl::PointNormal> gp3;
   pcl::PolygonMesh triangles;
 
-  gp3.setSearchRadius(0.3); // Increased radius, TUNE THIS
+  gp3.setSearchRadius(0.3);
   gp3.setMu(2.5);
   gp3.setMaximumNearestNeighbors(250);
   gp3.setMinimumAngle(M_PI / 18);
@@ -924,14 +1005,13 @@ if (!cloud || cloud->size() < 20) {
     return nullptr;
   }
 
-  // 5. --- Convert pcl::PolygonMesh to spark_dsg::Mesh ---
+  // --- Convert pcl::PolygonMesh to spark_dsg::Mesh ---
   auto final_mesh = std::make_shared<spark_dsg::Mesh>();
   
-  // **FIX:** Convert the generic PCL mesh data to a temporary, structured point cloud first.
   pcl::PointCloud<pcl::PointXYZ> vertices;
   pcl::fromPCLPointCloud2(triangles.cloud, vertices);
   
-  // Now, manually copy the vertices into the spark_dsg mesh structure.
+  //copy the vertices into the spark_dsg mesh structure.
   final_mesh->points.reserve(vertices.size());
   for (const auto& point : vertices) {
       final_mesh->points.emplace_back(point.x, point.y, point.z);

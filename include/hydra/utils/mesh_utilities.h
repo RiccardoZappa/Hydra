@@ -52,6 +52,9 @@ bool updateObjectGeometry(const spark_dsg::Mesh& mesh,
                           const std::vector<size_t>* indices = nullptr,
                           std::optional<BoundingBox::Type> type = std::nullopt);
 
+void updateBoundingBoxFromPointCloud(ObjectNodeAttributes& attrs, 
+                                        BoundingBox::Type type = BoundingBox::Type::AABB);
+
 // void removeMeshOutliers(const spark_dsg::Mesh& mesh,
 //                         ObjectNodeAttributes& attrs,
 //                         std::optional<BoundingBox::Type> type = std::nullopt);

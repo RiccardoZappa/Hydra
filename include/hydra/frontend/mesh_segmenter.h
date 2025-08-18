@@ -108,7 +108,7 @@ class MeshSegmenter {
                    const LabelClusters& clusters,
                    size_t num_archived_vertices,
                    DynamicSceneGraph& graph,
-                   const Eigen::Isometry3d& sensor_pose);
+                   const ReconstructionOutput& input);
 
   std::unordered_set<NodeId> getActiveNodes() const;
 
@@ -119,13 +119,15 @@ class MeshSegmenter {
                       const Cluster& cluster,
                       uint32_t label,
                       uint64_t timestamp,
-                      const Eigen::Isometry3d& sensor_pose);
+                      const Eigen::Isometry3d& sensor_pose,
+                      pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud);
 
   void updateNodeInGraph(DynamicSceneGraph& graph,
                          const Cluster& cluster,
                          const SceneGraphNode& node,
                          uint64_t timestamp,
-                         const Eigen::Isometry3d& sensor_pose);
+                         const Eigen::Isometry3d& sensor_pose,
+                         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud);
 
   void mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label);
 
@@ -261,6 +263,10 @@ bool isPointCloseToCloudKDTree(const CloudPoint& point_D,
  */
 ClassToInstance computeInstancesClouds(const ReconstructionOutput& input,
                                        MeshSegmenter::Config config);
+
+pcl::PointCloud<pcl::PointXYZRGBA>::Ptr generateHighResPointCloud(const hydra::InputData& sensor_data,
+                                                                  const hydra::MaskData& mask_data,
+                                                                  MeshSegmenter::Config config);
 /**
  * @brief extract pcl clusters for each instance from the monolithic map. From the
  * reconstructed clouds from compute InstancesClouds, go over the full map's point

@@ -40,6 +40,8 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/common/common.h> 
+#include <pcl/common/centroid.h> 
 #include <spark_dsg/bounding_box_extraction.h>
 
 #include <algorithm>
@@ -121,6 +123,24 @@ bool updateObjectGeometry(const spark_dsg::Mesh& mesh,
     return updateNodeCentroid(mesh, mesh_connections, attrs);
   }
   // return updateNodeCentroid(mesh, mesh_connections, attrs);
+}
+
+void updateBoundingBoxFromPointCloud(spark_dsg::ObjectNodeAttributes& attrs,
+                                     spark_dsg::BoundingBox::Type type) {
+    if (!attrs.point_cloud || attrs.point_cloud->empty()) {
+        attrs.bounding_box.type = spark_dsg::BoundingBox::Type::INVALID;
+        return;
+    }
+
+    Eigen::Vector4f min_pt, max_pt;
+    pcl::getMinMax3D(*attrs.point_cloud, min_pt, max_pt);
+
+    const Eigen::Vector3f dimensions = max_pt.head<3>() - min_pt.head<3>();
+    const Eigen::Vector3f world_P_center = min_pt.head<3>() + (dimensions / 2.0f);
+
+    attrs.bounding_box = spark_dsg::BoundingBox(dimensions,
+                                                world_P_center);
+    attrs.bounding_box.type = type;
 }
 
 MeshLayer::Ptr getActiveMesh(const MeshLayer& mesh_layer,
