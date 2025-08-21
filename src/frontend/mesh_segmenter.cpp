@@ -90,6 +90,12 @@ using MeshCloud = pcl::PointCloud<CloudPoint>;
 using InstanceData = std::pair<MaskData, MeshCloud::Ptr>;
 using ClassToInstance = std::unordered_map<int64, std::vector<InstanceData>>;
 
+void declare_config(MeshSegmenter::ObjectDetectionParams& config) {
+    using namespace config;
+    name("ObjectDetectionParams"); // Give the YAML block a name
+    field(config.min_cluster_size, "min_cluster_size");
+}
+
 void declare_config(MeshSegmenter::Config& config) {
   using namespace config;
   name("MeshSegmenterConfig");
@@ -98,7 +104,10 @@ void declare_config(MeshSegmenter::Config& config) {
   field(config.layer_id, "layer_id");
   field(config.active_index_horizon_m, "active_index_horizon_m");
   field(config.cluster_tolerance, "cluster_tolerance");
-  field(config.min_cluster_size, "min_cluster_size");
+  //block code to load the custom min_cluster_size for each object
+  field(config.per_object_params, "per_object_params");
+  field(config.default_object_params, "per_object_params/default");
+
   field(config.max_cluster_size, "max_cluster_size");
   enum_field(config.bounding_box_type,
              "bounding_box_type",
@@ -117,6 +126,14 @@ void declare_config(MeshSegmenter::Config& config) {
   field(config.merge_active_nodes, "merge_active_nodes");
   field(config.close_to_cloud_threshold, "close_to_cloud_threshold");
   field(config.mesh_integrator_config, "mesh");
+}
+
+const MeshSegmenter::ObjectDetectionParams& getParamsForLabel(const MeshSegmenter::Config& config, uint32_t label) {
+    auto it = config.per_object_params.find(std::to_string(label));
+    if (it != config.per_object_params.end()) {
+        return it->second; // Return the specific params if found
+    }
+    return config.default_object_params; // Otherwise, return the default
 }
 
 template <typename LList, typename RList>
@@ -240,7 +257,7 @@ LabelIndices getLabelIndices(const MeshSegmenter::Config& config,
     iter->second.push_back(idx);
   }
 
-  VLOG(2) << "[Mesh Segmenter] Seen labels: " << printLabels(seen_labels);
+  VLOG(0) << "[Mesh Segmenter] Seen labels: " << printLabels(seen_labels);
   return label_indices;
 }
 
@@ -297,7 +314,7 @@ void euclideanClustering(MeshCloud::Ptr cloud_ptr,
     tree->setInputCloud(cloud_ptr);
     pcl::EuclideanClusterExtraction<CloudPoint> estimator;
     estimator.setClusterTolerance(config.cluster_tolerance);
-    estimator.setMinClusterSize(config.min_cluster_size);
+    estimator.setMinClusterSize(config.default_object_params.min_cluster_size);
     estimator.setMaxClusterSize(config.max_cluster_size);
     estimator.setSearchMethod(tree);
     estimator.setInputCloud(cloud_ptr);
@@ -414,33 +431,33 @@ ClassToInstance computeInstancesClouds(const ReconstructionOutput& input,
       }
     }
     // Downsample
-    MeshCloud::Ptr cloud_downsampled =
-        downsampleCloud(instance_mesh_ptr, config.processing_grid_size);
+    // MeshCloud::Ptr cloud_downsampled =
+    //     downsampleCloud(instance_mesh_ptr, config.processing_grid_size);
 
     // Remove the floor here
-    MeshCloud::Ptr cloud_floor_rm = removeFloor(cloud_downsampled, config.min_mesh_z);
-
+    MeshCloud::Ptr cloud_floor_rm = removeFloor(instance_mesh_ptr, config.min_mesh_z);
+    
     // remove outlier
-    MeshCloud::Ptr cloud_filtered =
-        cloudStatisticalOutlierRemoval(cloud_floor_rm, 50, 1);
+    // MeshCloud::Ptr cloud_filtered =
+    //     cloudStatisticalOutlierRemoval(cloud_floor_rm, 50, 1);
 
-    CloudPoint mesh_median = computeMeshMedian(cloud_filtered);
+    CloudPoint mesh_median = computeMeshMedian(cloud_floor_rm);
     //! Find Cluster (Try to fix splattering issue, skippable if segmentation quality is
     //! good enough)
     std::vector<pcl::PointIndices> cluster_indices;
     MeshCloud::Ptr valid_cluster(new MeshCloud);
     if (!config.skip_clustering) {
-      if (!cloud_filtered->points.empty()) {
-        euclideanClustering(cloud_filtered, cluster_indices, config);
+      if (!cloud_floor_rm->points.empty()) {
+        euclideanClustering(cloud_floor_rm, cluster_indices, config);
         int k = 10;
         for (const auto& cluster : cluster_indices) {
           pcl::KdTreeFLANN<CloudPoint> kdtree;
           MeshCloud::Ptr cluster_cloud(new MeshCloud);
           for (const auto& id : cluster.indices) {
             CloudPoint point;
-            point.x = cloud_filtered->points[id].x;
-            point.y = cloud_filtered->points[id].y;
-            point.z = cloud_filtered->points[id].z;
+            point.x = cloud_floor_rm->points[id].x;
+            point.y = cloud_floor_rm->points[id].y;
+            point.z = cloud_floor_rm->points[id].z;
             cluster_cloud->push_back(point);
           }
           if (isPointCloseToCloudKDTree(
@@ -450,7 +467,7 @@ ClassToInstance computeInstancesClouds(const ReconstructionOutput& input,
         }
       }
     } else {
-      valid_cluster = cloud_filtered;
+      valid_cluster = cloud_floor_rm;
     }
 
     if (valid_cluster->size() > 0) {
@@ -533,7 +550,8 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
                               const std::vector<size_t>& indices,
                               const int64& class_id,
                               const ClassToInstance& class_to_instance,
-                              std::unordered_set<size_t>& registered_indices) {
+                              std::unordered_set<size_t>& registered_indices,
+                              size_t min_cluster_size) {
   Clusters clusters;
 
   float threshold = config.close_to_cloud_threshold;
@@ -570,7 +588,7 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
           }
         }
       }
-      if (instance_cluster.indices.size() >= config.min_cluster_size) {
+      if (instance_cluster.indices.size() >= min_cluster_size) {
         instance_cluster.centroid /= instance_cluster.indices.size();
         instance_cluster.mask = instance_mask;
         clusters.push_back(instance_cluster);
@@ -622,23 +640,46 @@ LabelClusters MeshSegmenter::detect(const ReconstructionOutput& input,
   }
   for (const auto label : available_labels) {
   // for (const auto label : config.labels) {
+    VLOG(0) << "----------------------------------------------------";
+    VLOG(0) << "[DEBUG] Processing Label ID: " << label;
+
     if (!label_indices.count(label)) {
+      VLOG(0) << "[DEBUG]   - FAIL: Label not found in background mesh vertices. Skipping.";
+      continue;
+    }
+    const auto& obj_params = getParamsForLabel(config, label);
+
+    VLOG(0) << "[DEBUG]   - Checking mesh vertex count against min_cluster_size...";
+    VLOG(0) << "[DEBUG]       - Mesh Vertices Found: " << label_indices.at(label).size();
+    VLOG(0) << "[DEBUG]       - Required min_cluster_size: " << obj_params.min_cluster_size;
+
+
+    if (label_indices.at(label).size() < obj_params.min_cluster_size) {
+       VLOG(0) << "[DEBUG]   - FAIL: Vertex count is less than threshold. Skipping.";
       continue;
     }
 
-    if (label_indices.at(label).size() < config.min_cluster_size) {
-      continue;
-    }
-
+    VLOG(0) << "[DEBUG]   - PASS: Vertex count is sufficient. Proceeding to compute instance clouds from masks.";
     const auto class_to_mesh = computeInstancesClouds(input, config);
+
+    if (class_to_mesh.count(label)) {
+      VLOG(0) << "[DEBUG]   - computeInstancesClouds SUCCESS: Found " 
+              << class_to_mesh.at(label).size() << " raw instance(s) for label " << label;
+    } else {
+      VLOG(0) << "[DEBUG]   - computeInstancesClouds FAIL: No valid point cloud instances were created for label " 
+              << label << ". This is likely due to filtering (e.g., outlier removal) inside that function.";
+      continue; // No point in continuing if no cloud was made
+    }
+
     const auto clusters = findInstanceClusters(config,
                                                delta,
                                                label_indices.at(label),
                                                label,
                                                class_to_mesh,
-                                               registered_indices);
+                                               registered_indices,
+                                               obj_params.min_cluster_size);
 
-    VLOG(2) << "[Mesh Segmenter]  - Found " << clusters.size()
+    VLOG(0) << "[Mesh Segmenter]  - Found " << clusters.size()
             << " cluster(s) of label " << static_cast<int>(label);
     label_clusters.insert({label, clusters});
   }
@@ -711,7 +752,7 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
           }
       }
 
-      const float matching_threshold = 0.5f; // can be customizable
+      const float matching_threshold = 0.25f; // can be customizable
       bool match_found = (best_match_id != 0 && min_dist < matching_threshold);
 
       MeshCloud::Ptr high_res_cloud = generateHighResPointCloud(*input.sensor_data, cluster.mask, config);
@@ -743,7 +784,7 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
 }
 
 void MeshSegmenter::mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label) {
-    VLOG(0) << "--- Starting Global Merge Check for Label " << label << " ---";
+    VLOG(1) << "--- Starting Global Merge Check for Label " << label << " ---";
 
     bool merged_in_pass = true;
     while (merged_in_pass) {
@@ -793,7 +834,7 @@ void MeshSegmenter::mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label) {
             auto& target_attrs = graph.getNode(target_node).attributes<ObjectNodeAttributes>();
             auto& source_attrs = graph.getNode(node_to_delete).attributes<ObjectNodeAttributes>();
             
-            VLOG(0) << "MERGING node " << node_to_delete << " into " << target_node;
+            VLOG(1) << "MERGING node " << node_to_delete << " into " << target_node;
 
             // Merge the point clouds
             if (source_attrs.point_cloud && !source_attrs.point_cloud->empty()) {
@@ -816,16 +857,16 @@ void MeshSegmenter::mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label) {
         for (const auto& node_id : active_nodes) {
             if (graph.hasNode(node_id)) {
                 auto& attrs = graph.getNode(node_id).attributes<ObjectNodeAttributes>();
-                VLOG(0) << "  - Updating geometry for merged node " << node_id;
+                VLOG(1) << "  - Updating geometry for merged node " << node_id;
 
                 updateObjectGeometry(*graph.mesh(), attrs); 
                 updateBoundingBoxFromPointCloud(attrs, attrs.bounding_box.type); // calculation of the correct bounding box based on denser pointcloud
             }
         }
-        VLOG(0) << "  - Completed a merge pass. Re-checking...";
+        VLOG(1) << "  - Completed a merge pass. Re-checking...";
     }
 
-    VLOG(0) << "--- Finished Global Merge Check for Label " << label << ". Final active node count: " << active_nodes_.size() << " ---";
+    VLOG(1) << "--- Finished Global Merge Check for Label " << label << ". Final active node count: " << active_nodes_.size() << " ---";
 }
 
 
@@ -875,13 +916,13 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
     icp.setInputSource(high_res_cloud); // The new scan
     icp.setInputTarget(attrs.point_cloud); // The accumulated model
     
-    icp.setMaxCorrespondenceDistance(0.2); // i will have to tune this parameters (maybe can be customizable)
+    icp.setMaxCorrespondenceDistance(0.005); // i will have to tune this parameters (maybe can be customizable)
     icp.setMaximumIterations(50);
     
     pcl::PointCloud<CloudPoint> final_aligned_cloud;
     icp.align(final_aligned_cloud);
     //bed, sofa max_fitens_score 0.005, 0.01 downsample
-    const float MAX_FITNESS_SCORE = 0.02; // Max allowable MSE (e.g., 0.01 m^2)
+    const float MAX_FITNESS_SCORE = 0.005; // Max allowable MSE (e.g., 0.01 m^2)
     if (icp.hasConverged() && icp.getFitnessScore() < MAX_FITNESS_SCORE) {
         *(attrs.point_cloud) += final_aligned_cloud;
         if (!attrs.point_cloud->empty()) {
@@ -889,7 +930,7 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
           attrs.point_cloud.swap(cloud_downsampled);
         }
     } else {
-        VLOG(0) << "ICP failed to converge or had poor fitness ("
+        VLOG(1) << "ICP failed to converge or had poor fitness ("
                 << icp.getFitnessScore() << "). Discarding update for node " << node.id;
     }
   }

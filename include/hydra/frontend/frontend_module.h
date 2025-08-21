@@ -76,9 +76,9 @@ class FrontendModule : public Module {
   using Sink = OutputSink<uint64_t, const DynamicSceneGraph&, const BackendInput&>;
 
   struct Config {
-    size_t min_object_vertices = 20;
+    size_t min_object_vertices = 0;
     bool lcd_use_bow_vectors = true;
-    size_t min_valid_views = 10;
+    size_t min_valid_views = 0;
     struct DeformationConfig {
       double mesh_resolution = 0.1;
       double d_graph_resolution = 1.5;

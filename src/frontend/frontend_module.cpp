@@ -527,7 +527,7 @@ void FrontendModule::checkObjectsInViewFrustum(const ReconstructionOutput& input
     } else {
       if (object_attr.instance_views.id_to_instance_masks_.size() <
               config.min_valid_views ||
-          object_attr.mesh_connections.size() < config.min_object_vertices) {
+          object_attr.mesh_connections.size() < config.min_object_vertices) { // modify to adapt to not remove small
         LOG(INFO) << "Removing instance " << object_attr.name << " " << node_id
                   << "with " << object_attr.instance_views.id_to_instance_masks_.size()
                   << " instances which is smaller than " << config.min_valid_views;

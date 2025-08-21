@@ -39,6 +39,7 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <optional>
 
 #include <memory>
 
@@ -73,13 +74,20 @@ class MeshSegmenter {
                           const kimera_pgmo::MeshDelta&,
                           const std::vector<size_t>&,
                           const LabelIndices&>;
+                        
+  enum class AssociationStrategy { STRICT, MASK_PRIORITY };
+
+  struct ObjectDetectionParams {
+    size_t min_cluster_size = 40; // default value
+  };
 
   struct Config {
     char prefix = 'O';
     LayerId layer_id = DsgLayers::OBJECTS;
     double active_index_horizon_m = 7.0;
     double cluster_tolerance = 0.25;
-    size_t min_cluster_size = 40;
+    std::map<std::string, ObjectDetectionParams> per_object_params;
+    ObjectDetectionParams default_object_params;
     size_t max_cluster_size = 100000;
     float angle_step = 10.0f;
     BoundingBox::Type bounding_box_type = BoundingBox::Type::AABB;
@@ -147,6 +155,9 @@ using InstanceData = std::pair<MaskData, MeshCloud::Ptr>;
 using ClassToInstance = std::unordered_map<int64, std::vector<InstanceData>>;
 
 void declare_config(MeshSegmenter::Config& config);
+void declare_config(MeshSegmenter::ObjectDetectionParams& config);
+
+const MeshSegmenter::ObjectDetectionParams& getParamsForLabel(const MeshSegmenter::Config& config, uint32_t label);
 
 /**
  * @brief Check if two nodes are close together -> consider as the same object, use when
@@ -286,7 +297,9 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
                               const std::vector<size_t>& indices,
                               const int64& class_id,
                               const ClassToInstance& class_to_instance,
-                              std::unordered_set<size_t>& registered_indices);
+                              std::unordered_set<size_t>& registered_indices,
+                              size_t min_cluster_size,
+                              std::optional<MeshSegmenter::AssociationStrategy> strategy = MeshSegmenter::AssociationStrategy::STRICT);
 
 spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud);
 
