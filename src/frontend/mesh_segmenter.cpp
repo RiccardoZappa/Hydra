@@ -259,7 +259,7 @@ LabelIndices getLabelIndices(const MeshSegmenter::Config& config,
     iter->second.push_back(idx);
   }
 
-  VLOG(0) << "[Mesh Segmenter] Seen labels: " << printLabels(seen_labels);
+  VLOG(1) << "[Mesh Segmenter] Seen labels: " << printLabels(seen_labels);
   return label_indices;
 }
 
@@ -432,17 +432,10 @@ ClassToInstance computeInstancesClouds(const ReconstructionOutput& input,
         }
       }
     }
-    // Downsample
-    // MeshCloud::Ptr cloud_downsampled =
-    //     downsampleCloud(instance_mesh_ptr, config.processing_grid_size);
 
     // Remove the floor here
     MeshCloud::Ptr cloud_floor_rm = removeFloor(instance_mesh_ptr, config.min_mesh_z);
     
-    // remove outlier
-    // MeshCloud::Ptr cloud_filtered =
-    //     cloudStatisticalOutlierRemoval(cloud_floor_rm, 50, 1);
-
     CloudPoint mesh_median = computeMeshMedian(cloud_floor_rm);
     //! Find Cluster (Try to fix splattering issue, skippable if segmentation quality is
     //! good enough)
@@ -492,26 +485,6 @@ pcl::PointCloud<pcl::PointXYZRGBA>::Ptr generateHighResPointCloud(const hydra::I
                                                                   MeshSegmenter::Config config){
 
   const cv::Mat& vertex_map = sensor_data.vertex_map;
-  const cv::Mat& color_image = sensor_data.color_image;
-  const Eigen::Isometry3d& world_T_sensor = sensor_data.getSensorPose();
-
-  // MeshCloud::Ptr cloud_sensor_frame(new MeshCloud);
-
-  // // --- 2. Build High-Res Cloud in the SENSOR's Frame from the Mask ---
-  // for (int r = 0; r < mask_data.mask.rows; ++r) {
-  //   for (int c = 0; c < mask_data.mask.cols; ++c) {
-  //     if (mask_data.mask.at<uint8_t>(r, c) != 0) {
-  //       const auto& point_cv = vertex_map.at<cv::Vec3f>(r, c);
-  //       if (std::isnan(point_cv[0])) continue;
-
-  //       CloudPoint p;
-  //       p.x = point_cv[0]; p.y = point_cv[1]; p.z = point_cv[2];
-  //       const auto& color = color_image.at<cv::Vec3b>(r, c);
-  //       p.b = color[0]; p.g = color[1]; p.r = color[2]; p.a = 255;
-  //       cloud_sensor_frame->push_back(p);
-  //     }
-  //   }
-  // }
 
   const int& rows = vertex_map.size().height;
   const int& cols = vertex_map.size().width;
@@ -641,37 +614,20 @@ LabelClusters MeshSegmenter::detect(const ReconstructionOutput& input,
     available_labels.insert(mask.class_id);
   }
   for (const auto label : available_labels) {
-  // for (const auto label : config.labels) {
-    VLOG(0) << "----------------------------------------------------";
-    VLOG(0) << "[DEBUG] Processing Label ID: " << label;
 
     if (!label_indices.count(label)) {
-      VLOG(0) << "[DEBUG]   - FAIL: Label not found in background mesh vertices. Skipping.";
+      VLOG(1) << "[DEBUG]   - FAIL: Label not found in background mesh vertices. Skipping.";
       continue;
     }
     const auto& obj_params = getParamsForLabel(config, label);
 
-    VLOG(0) << "[DEBUG]   - Checking mesh vertex count against min_cluster_size...";
-    VLOG(0) << "[DEBUG]       - Mesh Vertices Found: " << label_indices.at(label).size();
-    VLOG(0) << "[DEBUG]       - Required min_cluster_size: " << obj_params.min_cluster_size;
-
 
     if (label_indices.at(label).size() < obj_params.min_cluster_size) {
-       VLOG(0) << "[DEBUG]   - FAIL: Vertex count is less than threshold. Skipping.";
+       VLOG(1) << "[DEBUG]   - FAIL: Vertex count is less than threshold. Skipping.";
       continue;
     }
 
-    VLOG(0) << "[DEBUG]   - PASS: Vertex count is sufficient. Proceeding to compute instance clouds from masks.";
     const auto class_to_mesh = computeInstancesClouds(input, config);
-
-    if (class_to_mesh.count(label)) {
-      VLOG(0) << "[DEBUG]   - computeInstancesClouds SUCCESS: Found " 
-              << class_to_mesh.at(label).size() << " raw instance(s) for label " << label;
-    } else {
-      VLOG(0) << "[DEBUG]   - computeInstancesClouds FAIL: No valid point cloud instances were created for label " 
-              << label << ". This is likely due to filtering (e.g., outlier removal) inside that function.";
-      continue; // No point in continuing if no cloud was made
-    }
 
     const auto clusters = findInstanceClusters(config,
                                                delta,
@@ -681,8 +637,6 @@ LabelClusters MeshSegmenter::detect(const ReconstructionOutput& input,
                                                registered_indices,
                                                obj_params.min_cluster_size);
 
-    VLOG(0) << "[Mesh Segmenter]  - Found " << clusters.size()
-            << " cluster(s) of label " << static_cast<int>(label);
     label_clusters.insert({label, clusters});
   }
 
@@ -767,14 +721,12 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
                             cluster, 
                             graph.getNode(best_match_id), 
                             timestamp_ns, 
-                            input.sensor_data->getSensorPose(), 
                             high_res_cloud);
       } else {
           addNodeToGraph(graph, 
                         cluster, 
                         label, 
                         timestamp_ns, 
-                        input.sensor_data->getSensorPose(), 
                         high_res_cloud);
       }
 
@@ -885,7 +837,6 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
                                       const Cluster& cluster,
                                       const SceneGraphNode& node,
                                       uint64_t timestamp,
-                                      const Eigen::Isometry3d& sensor_pose,
                                       pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud) {
   auto& attrs = node.attributes<ObjectNodeAttributes>();
   attrs.last_update_time_ns = timestamp;
@@ -919,7 +870,7 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
     icp.setInputSource(high_res_cloud); // The new scan
     icp.setInputTarget(attrs.point_cloud); // The accumulated model
     
-    icp.setMaxCorrespondenceDistance(0.005); // i will have to tune this parameters (maybe can be customizable)
+    icp.setMaxCorrespondenceDistance(0.001); // i will have to tune this parameters (maybe can be customizable)
     icp.setMaximumIterations(50);
     
     pcl::PointCloud<CloudPoint> final_aligned_cloud;
@@ -931,7 +882,7 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
         if (!attrs.point_cloud->empty()) {
           auto label = cluster.mask.class_id;
           const auto& obj_params = getParamsForLabel(config, label);
-          MeshCloud::Ptr cloud_downsampled = downsampleCloud(attrs.point_cloud, obj_params.cloud_downsampling); // this should be customizable as in updatenodegraph
+          MeshCloud::Ptr cloud_downsampled = downsampleCloud(attrs.point_cloud, obj_params.cloud_downsampling);
           attrs.point_cloud.swap(cloud_downsampled);
         }
     } else {
@@ -952,7 +903,6 @@ void MeshSegmenter::addNodeToGraph(DynamicSceneGraph& graph,
                                    const Cluster& cluster,
                                    uint32_t label,
                                    uint64_t timestamp,
-                                   const Eigen::Isometry3d& sensor_pose,
                                    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud) {
   if (cluster.indices.empty()) {
     LOG(ERROR) << "Encountered empty cluster with label" << static_cast<int>(label)
@@ -1027,7 +977,7 @@ spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRG
   pcl::copyPointCloud(*cloud, *cloud_with_normals); // Copies the XYZ data
   pcl::copyPointCloud(*normals, *cloud_with_normals); // Copies the Normal data
 
-  // 4. --- Perform Meshing ---
+  // --- Perform Meshing ---
   pcl::search::KdTree<pcl::PointNormal>::Ptr tree2(new pcl::search::KdTree<pcl::PointNormal>);
   tree2->setInputCloud(cloud_with_normals);
 
@@ -1077,45 +1027,4 @@ spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRG
   return final_mesh;
 }
 
-void integratePoints(hydra::VolumetricMap& local_tsdf,
-                     const Eigen::Vector3d& object_centroid_world,
-                     const pcl::PointCloud<pcl::PointXYZRGBA>& new_points_world,
-                     const Eigen::Isometry3d& world_T_sensor) {
-
-  Eigen::Affine3d object_T_world(Eigen::Translation3d(-object_centroid_world));
-
-  pcl::PointCloud<pcl::PointXYZRGBA> points_local;
-  pcl::transformPointCloud(new_points_world, points_local, object_T_world.cast<float>());
-
-  spatial_hash::Point sensor_origin_local = (object_T_world * world_T_sensor.translation()).cast<float>();
-
-  const float voxel_size = local_tsdf.config.voxel_size;
-  const float trunc_dist = local_tsdf.config.truncation_distance;
-  
-  for (const auto& point : points_local.points) {
-    const spatial_hash::Point point_local = point.getVector3fMap();
-    const float ray_length = (point_local - sensor_origin_local).norm();
-    if (ray_length < 1.0e-4) continue;
-
-    const spatial_hash::Point ray_direction = (point_local - sensor_origin_local) / ray_length;
-    
-    for (float current_dist = 0.f; current_dist < ray_length + trunc_dist; current_dist += voxel_size) {
-      const spatial_hash::Point current_pos = sensor_origin_local + ray_direction * current_dist;
-      
-      const spatial_hash::BlockIndex block_index = 
-      local_tsdf.getTsdfLayer().getBlockIndex(current_pos);
-
-      auto block = local_tsdf.getTsdfLayer().allocateBlockPtr(block_index);
-      if (!block) continue;
-
-      hydra::TsdfVoxel& voxel = block->getVoxel(block->getVoxelIndex(current_pos));
-      const float sdf = ray_length - current_dist;
-      if (sdf < -trunc_dist) continue;
-
-      const float truncated_sdf = std::max(-trunc_dist, std::min(trunc_dist, sdf));
-      voxel.distance = (voxel.distance * voxel.weight + truncated_sdf) / (voxel.weight + 1.0f);
-      voxel.weight = std::min(voxel.weight + 1.0f, 20.0f);
-    }
-  }
-}
 }  // namespace hydra

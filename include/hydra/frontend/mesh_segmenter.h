@@ -127,14 +127,12 @@ class MeshSegmenter {
                       const Cluster& cluster,
                       uint32_t label,
                       uint64_t timestamp,
-                      const Eigen::Isometry3d& sensor_pose,
                       pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud);
 
   void updateNodeInGraph(DynamicSceneGraph& graph,
                          const Cluster& cluster,
                          const SceneGraphNode& node,
                          uint64_t timestamp,
-                         const Eigen::Isometry3d& sensor_pose,
                          pcl::PointCloud<pcl::PointXYZRGBA>::Ptr high_res_cloud);
 
   void mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label);
@@ -301,10 +299,5 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
                               size_t min_cluster_size);
 
 spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud);
-
-void integratePoints(hydra::VolumetricMap& local_tsdf,
-                     const Eigen::Vector3d& object_centroid_world,
-                     const pcl::PointCloud<pcl::PointXYZRGBA>& new_points_world,
-                     const Eigen::Isometry3d& world_T_sensor); 
 
 }  // namespace hydra
