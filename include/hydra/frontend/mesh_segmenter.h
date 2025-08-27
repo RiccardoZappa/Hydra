@@ -74,11 +74,11 @@ class MeshSegmenter {
                           const kimera_pgmo::MeshDelta&,
                           const std::vector<size_t>&,
                           const LabelIndices&>;
-                        
-  enum class AssociationStrategy { STRICT, MASK_PRIORITY };
 
   struct ObjectDetectionParams {
-    size_t min_cluster_size = 40; // default value
+    size_t min_cluster_size = 10; // default value
+    float cloud_downsampling = 0.1f;
+    float matching_threshold = 0.01f;
   };
 
   struct Config {
@@ -298,8 +298,7 @@ Clusters findInstanceClusters(const MeshSegmenter::Config& config,
                               const int64& class_id,
                               const ClassToInstance& class_to_instance,
                               std::unordered_set<size_t>& registered_indices,
-                              size_t min_cluster_size,
-                              std::optional<MeshSegmenter::AssociationStrategy> strategy = MeshSegmenter::AssociationStrategy::STRICT);
+                              size_t min_cluster_size);
 
 spark_dsg::Mesh::Ptr generateMeshFromCloud(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr& cloud);
 

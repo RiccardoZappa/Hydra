@@ -94,7 +94,9 @@ void declare_config(MeshSegmenter::ObjectDetectionParams& config) {
     using namespace config;
     name("ObjectDetectionParams"); // Give the YAML block a name
     field(config.min_cluster_size, "min_cluster_size");
-}
+    field(config.cloud_downsampling, "cloud_downsampling");
+    field(config.matching_threshold, "matching_threshold");
+  }
 
 void declare_config(MeshSegmenter::Config& config) {
   using namespace config;
@@ -752,8 +754,8 @@ void MeshSegmenter::updateGraph(uint64_t timestamp_ns,
           }
       }
 
-      const float matching_threshold = 0.25f; // can be customizable
-      bool match_found = (best_match_id != 0 && min_dist < matching_threshold);
+      const auto& obj_params = getParamsForLabel(config, label);
+      bool match_found = (best_match_id != 0 && min_dist < obj_params.matching_threshold);
 
       MeshCloud::Ptr high_res_cloud = generateHighResPointCloud(*input.sensor_data, cluster.mask, config);
       if (!high_res_cloud || high_res_cloud->empty()) {
@@ -840,8 +842,9 @@ void MeshSegmenter::mergeActiveNodes(DynamicSceneGraph& graph, uint32_t label) {
             if (source_attrs.point_cloud && !source_attrs.point_cloud->empty()) {
                 if (target_attrs.point_cloud) {
                     *target_attrs.point_cloud += *source_attrs.point_cloud;
-                    
-                    MeshCloud::Ptr cloud_downsampled = downsampleCloud(target_attrs.point_cloud, 0.005f); // this should be customizable
+
+                    const auto& obj_params = getParamsForLabel(config, label);
+                    MeshCloud::Ptr cloud_downsampled = downsampleCloud(target_attrs.point_cloud, obj_params.cloud_downsampling); // this should be customizable
                     target_attrs.point_cloud.swap(cloud_downsampled); 
                 } else {
                     target_attrs.point_cloud.reset(new MeshCloud(*source_attrs.point_cloud));
@@ -926,7 +929,9 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
     if (icp.hasConverged() && icp.getFitnessScore() < MAX_FITNESS_SCORE) {
         *(attrs.point_cloud) += final_aligned_cloud;
         if (!attrs.point_cloud->empty()) {
-          MeshCloud::Ptr cloud_downsampled = downsampleCloud(attrs.point_cloud, 0.005f); // this should be customizable as in updatenodegraph
+          auto label = cluster.mask.class_id;
+          const auto& obj_params = getParamsForLabel(config, label);
+          MeshCloud::Ptr cloud_downsampled = downsampleCloud(attrs.point_cloud, obj_params.cloud_downsampling); // this should be customizable as in updatenodegraph
           attrs.point_cloud.swap(cloud_downsampled);
         }
     } else {
