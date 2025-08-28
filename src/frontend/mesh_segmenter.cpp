@@ -96,6 +96,7 @@ void declare_config(MeshSegmenter::ObjectDetectionParams& config) {
     field(config.min_cluster_size, "min_cluster_size");
     field(config.cloud_downsampling, "cloud_downsampling");
     field(config.matching_threshold, "matching_threshold");
+    field(config.max_correspondence_distance, "max_correspondence_distance");
   }
 
 void declare_config(MeshSegmenter::Config& config) {
@@ -865,23 +866,23 @@ void MeshSegmenter::updateNodeInGraph(DynamicSceneGraph& graph,
       }
       return; 
     }
-    
+    auto label = cluster.mask.class_id;
+    const auto& obj_params = getParamsForLabel(config, label);
+
     pcl::IterativeClosestPoint<CloudPoint, CloudPoint> icp;
     icp.setInputSource(high_res_cloud); // The new scan
     icp.setInputTarget(attrs.point_cloud); // The accumulated model
     
-    icp.setMaxCorrespondenceDistance(0.001); // i will have to tune this parameters (maybe can be customizable)
+    icp.setMaxCorrespondenceDistance(obj_params.max_correspondence_distance); // i will have to tune this parameters (maybe can be customizable)
     icp.setMaximumIterations(50);
     
     pcl::PointCloud<CloudPoint> final_aligned_cloud;
     icp.align(final_aligned_cloud);
     //bed, sofa max_fitens_score 0.005, 0.01 downsample
-    const float MAX_FITNESS_SCORE = 0.005; // Max allowable MSE (e.g., 0.01 m^2)
+    const float MAX_FITNESS_SCORE = 0.001; // Max allowable MSE (e.g., 0.01 m^2)
     if (icp.hasConverged() && icp.getFitnessScore() < MAX_FITNESS_SCORE) {
         *(attrs.point_cloud) += final_aligned_cloud;
         if (!attrs.point_cloud->empty()) {
-          auto label = cluster.mask.class_id;
-          const auto& obj_params = getParamsForLabel(config, label);
           MeshCloud::Ptr cloud_downsampled = downsampleCloud(attrs.point_cloud, obj_params.cloud_downsampling);
           attrs.point_cloud.swap(cloud_downsampled);
         }

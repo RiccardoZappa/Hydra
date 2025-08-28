@@ -79,6 +79,7 @@ class MeshSegmenter {
     size_t min_cluster_size = 10; // default value
     float cloud_downsampling = 0.1f;
     float matching_threshold = 0.01f;
+    float max_correspondence_distance = 0.01;
   };
 
   struct Config {
